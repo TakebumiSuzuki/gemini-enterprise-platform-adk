@@ -29,11 +29,6 @@ from google.adk.tools.load_web_page import load_web_page
 from google.adk.tools.skill_toolset import SkillToolset
 from google.genai import types
 
-_, project_id = google.auth.default()
-os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
-os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-
 MODEL = "gemini-3.5-flash"
 _RETRY = types.HttpRetryOptions(attempts=3)
 
