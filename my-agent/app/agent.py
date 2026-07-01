@@ -18,6 +18,7 @@ import pathlib
 
 import google.auth
 from google.adk.agents import Agent
+from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.apps import App
 from google.adk.environment import LocalEnvironment
 from google.adk.models import Gemini
@@ -26,6 +27,10 @@ from google.adk.tools import google_search
 from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.environment import EnvironmentToolset
 from google.adk.tools.load_web_page import load_web_page
+from google.adk.tools.mcp_tool import McpToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import (
+    StreamableHTTPConnectionParams,
+)
 from google.adk.tools.skill_toolset import SkillToolset
 from google.genai import types
 
@@ -42,6 +47,16 @@ INSTRUCTION = (_APP_DIR / "instruction.md").read_text(encoding="utf-8").strip()
 # ファイル中心のワークフローの土台になる。
 _WORKSPACE = pathlib.Path("./workspace")
 
+# (E) Google 公式の Drive リモート MCP サーバ（Streamable HTTP）。
+# OAuth の同意・トークン取得/更新は Gemini Enterprise 側が代行し、会話中のユーザー本人の
+# アクセストークンを ToolContext.state["temp:<GEMINI_AUTH_ID>"] に注入する。
+# 本コードは注入されたトークンを読んで Bearer ヘッダで渡すだけ（OAuth 実装は持たない）。
+# 利用には google-adk[mcp]（mcp パッケージ）が必要。
+_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1"
+# Gemini Enterprise の Authorization リソース ID（登録時の --authorization-id と一致させる）。
+# 値は app/.env の GEMINI_AUTH_ID で設定。未設定時は認証ヘッダを付けない（＝Drive 呼び出しは失敗）。
+_GEMINI_AUTH_ID = os.environ.get("GEMINI_AUTH_ID", "")
+
 
 def _make_model() -> Gemini:
     return Gemini(model=MODEL, retry_options=_RETRY)
@@ -53,6 +68,37 @@ def _workspace_toolset() -> EnvironmentToolset:
     注: EnvironmentToolset / LocalEnvironment は ADK 上 EXPERIMENTAL 扱い。
     """
     return EnvironmentToolset(environment=LocalEnvironment(working_dir=_WORKSPACE))
+
+
+def _drive_auth_headers(ctx: ReadonlyContext) -> dict[str, str]:
+    """GE が state["temp:<AUTH_ID>"] に注入したエンドユーザーのアクセストークンを
+    毎回読み取り、Authorization: Bearer ヘッダにする。
+
+    トークンは短命なので自前でキャッシュせず、リクエストごとに state から読む。
+    """
+    if not _GEMINI_AUTH_ID:
+        return {}
+    token = ctx.state.get(f"temp:{_GEMINI_AUTH_ID}")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _drive_mcp_toolset() -> McpToolset:
+    """Drive リモート MCP の toolset。まずは読み取り専用ツールのみ公開（最小権限）。
+
+    書き込みも必要になれば tool_filter に create_file / copy_file を追加し、
+    GE 側 Authorization のスコープに drive.file を足す。
+    """
+    return McpToolset(
+        connection_params=StreamableHTTPConnectionParams(url=_DRIVE_MCP_URL),
+        header_provider=_drive_auth_headers,
+        tool_filter=[
+            "search_files",
+            "read_file_content",
+            "get_file_metadata",
+            "list_recent_files",
+            "download_file_content",
+        ],
+    )
 
 
 def _load_skills() -> list:
@@ -113,6 +159,7 @@ root_agent = Agent(
         AgentTool(agent=search_agent),   # Web 検索（分離済み）
         AgentTool(agent=general_agent),  # (C) QA / 検証の委譲先
         skill_toolset,                   # pptx / narrative 等のスキル
+        _drive_mcp_toolset(),            # (E) Google Drive（リモート MCP / OAuth は GE 代行）
     ],
 )
 
