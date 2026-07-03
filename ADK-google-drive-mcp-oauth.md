@@ -32,7 +32,7 @@ Platform UI で会話しているユーザー本人の権限で、エージェ�
         │
         ▼
 [Gemini Enterprise]
-   ① ユーザーに「Authorize」ボタン＋Google 同意画面を表示（Authorization リソースの手順書に従う）
+   ① ユーザーに「Authorize」ボタン＋Google 同意画面を表示（Authorization リソースに登録された鍵とURLを使って）
    ② 3-legged OAuth を実行し、ユーザーのアクセストークン（＋リフレッシュトークン）を取得
    ③ 取得したトークンを GE がサーバー側に保管（リフレッシュは永続／アクセスは期限まで使い回し・失効時は自動再発行。← 全部 GE がやる）
    ④ 有効なアクセストークンを、リクエストのたびに state["temp:AUTH_ID"] に注入
@@ -60,19 +60,19 @@ Platform UI で会話しているユーザー本人の権限で、エージェ�
 
 | | OAuth クライアント | Authorization リソース |
 |---|---|---|
-| どこにある | Google Cloud（Google Auth platform → Clients） | Gemini Enterprise の中（Discovery Engine `authorizations`） |
-| 正体 | アプリの身分証＋鍵（`client_id` / `client_secret`） | 設定レコード（鍵の使い方メモ）。**サーバーではない** |
-| 役割 | 「このアプリは正規」と Google に証明 | GE に「同意フローの回し方」を教える |
-| 例え | 会社の実印＋印鑑登録 | 受付に貼る「この案件はこの実印でこう手続き」手順書 |
+| どこにある | Google Auth Platform の Clients | Gemini Enterprise の中（Discovery Engine の `authorizations` リソース） |
+| 正体 | アプリの身分証＋鍵（アプリ種別・リダイレクトURI設定 ＋ `client_id` / `client_secret`） | 設定レコード（`client_id`/`client_secret` のコピー2つ＋接続先URL2つ、計4項目のみ）。文章の手順は書かれていない。**サーバーではない** |
+| 役割 | Google の認可サーバーに『このアプリ本人』であることを都度示す（身分証提示） | GE の定型OAuth処理エンジンに「どの鍵・どのURLを使うか」を指定する（フローの順序自体はOAuth2仕様でGE側に実装済み） |
+| 例え | 会社の実印＋印鑑登録 | 窓口に出す「この実印（のコピー）を使う」という**登録用紙**（実印の現物ではない） |
 | 作る回数 | 基本 1 回（使い回せる） | 権限セットごとに 1 つ（Drive 用に 1 つ） |
 
 **関係:** Cloud で作った OAuth クライアント（鍵）の情報を**書き写して包んだもの**が Authorization リソース。
 GE が「あなたの代理」で OAuth を回すために手元に持っておく設定情報。
 
-> 注（混乱しやすい点）: `client_id` / `client_secret` の**発行元は Auth platform → Clients**で、
-> Clients は**これを保存しており、作成後も目のアイコンや JSON ダウンロードで再表示できる**（＝「Clients が保管する」は正しい）。
+> 注（混乱しやすい点）: `client_id` / `client_secret` の**発行元は Google Auth Platform の Clients**で、
+> Clients が**この情報の SSOT（信頼できる唯一の発行元）**。作成後も目のアイコンや JSON ダウンロードで再表示できる（＝「Clients が保管する」は正しい）。
 > ただし **GE（Discovery Engine）は別サービスで、Clients を自動参照しない**（credential は自動では渡らない）。
-> だから secret を **Authorization リソースへ手でコピー**する必要があり、結果**同じ鍵が 2 か所に存在**する（矛盾ではない）。
+> だから secret を **Authorization リソースへ手でコピー**する必要があり、結果**同じ鍵が 2 か所に存在**する（SSOT のコピーが増えるだけで矛盾ではない）。
 > 例え: 鍵屋（Clients）で作った鍵の**合鍵を、管理人（Authorization リソース）に預ける**。管理人は鍵屋に取りに行かない。
 
 ### 2-2. `AUTH_ID` は 3 つの役割を兼ねる
@@ -120,7 +120,7 @@ Authorization リソースのフルネームは
         ※ authorizations は書かない
 
 【publish】 GE にエージェントを登録する
-   └─ ここで --authorization-id AUTH_ID を渡す（＝「この手順書を使え」と宣言）
+   └─ ここで --authorization-id AUTH_ID を渡す（＝「この接続設定を使え」と宣言）
 ```
 
 - **deploy** = トークンを**使う**プログラムを置く
@@ -221,7 +221,7 @@ client_id / client_secret は**エージェント側に置かない**（同意�
 ## 6. Google Cloud 側の具体手順
 
 ### 6-1. OAuth クライアント作成
-Google Cloud Console → **Google Auth platform → Clients** → Create client
+Google Cloud Console → **Google Auth Platform → Clients** → Create client
 - Application type: **Web application**
 - Authorized redirect URIs（GE 用の固定値）:
   - `https://vertexaisearch.cloud.google.com/oauth-redirect`
@@ -229,11 +229,9 @@ Google Cloud Console → **Google Auth platform → Clients** → Create client
 - 発行された **Client ID / Client secret** を控える。
 
 ### 6-2. 同意画面（スコープ）
-Google Auth platform → **Data Access** に Drive スコープを追加:
-- `https://www.googleapis.com/auth/drive.readonly`
-- `https://www.googleapis.com/auth/drive.file`
-
-（Drive MCP が要求するスコープ。読み取り中心なら `drive.readonly`、ファイル作成もするなら `drive.file` も。）
+Google Auth Platform → **Data Access** に Drive スコープを追加（**両方とも今のうちに登録**。将来の書き込み対応を見越して先取りしておく）:
+- `https://www.googleapis.com/auth/drive.readonly`（読み取り系: `search_files`/`read_file_content`/`get_file_metadata`/`list_recent_files`/`download_file_content`）
+- `https://www.googleapis.com/auth/drive.file`（書き込み系: `create_file`/`copy_file`）
 
 ### 6-3. API 有効化
 ```bash
@@ -242,20 +240,50 @@ gcloud services enable drivemcp.googleapis.com
 ```
 
 ### 6-4. Authorization リソース作成（Gemini Enterprise / Discovery Engine）
-コンソールのエージェント編集画面の Authorization セクション、または Discovery Engine API で作成。API の場合のボディ（フィールド名は検証済み）:
 
-```jsonc
-{
-  "serverSideOauth2": {
-    "clientId":         "OAUTH_CLIENT_ID",     // 6-1 の値
-    "clientSecret":     "OAUTH_CLIENT_SECRET", // 6-1 の値
-    "authorizationUri": "https://accounts.google.com/o/oauth2/v2/auth?client_id=OAUTH_CLIENT_ID&redirect_uri=https%3A%2F%2Fvertexaisearch.cloud.google.com%2Fstatic%2Foauth%2Foauth.html&scope=<URLエンコードしたDriveスコープ>&access_type=offline&prompt=consent&response_type=code",
-    "tokenUri":         "https://oauth2.googleapis.com/token"
-  }
-}
+作成方法は2通り。**gcloudの専用サブコマンドは存在しない**（コンソール操作 or REST API の curl のいずれか。一次情報で確認済み）。
+
+#### 方法A: コンソール（curl不要・おすすめ）
+エージェント編集画面の **Authorizations** セクションで新規作成。入力欄は以下の5つ（Codelabで確認済み。「スコープ」専用欄は無く、Authorization URIにスコープを埋め込んだ完成形をそのまま貼り付ける仕様）:
+
+| 入力欄 | 値 |
+|---|---|
+| Authorization name | `drive-auth` |
+| Client ID | 6-1 で発行された Client ID |
+| Client secret | 6-1 で発行された Client secret |
+| Authorization URI | 下記のコピペ用URL（`OAUTH_CLIENT_ID` 部分だけ実際の Client ID に置換） |
+| Token URI | `https://oauth2.googleapis.com/token` |
+
+Authorization URI（コピペ用・`drive.readonly` + `drive.file` の両スコープで組み立て済み）:
 ```
-- リソース名: `projects/PROJECT_ID/locations/global/authorizations/AUTH_ID`
-- `AUTH_ID` は `.env` の `GEMINI_AUTH_ID` と一致させる。
+https://accounts.google.com/o/oauth2/v2/auth?client_id=OAUTH_CLIENT_ID&redirect_uri=https%3A%2F%2Fvertexaisearch.cloud.google.com%2Fstatic%2Foauth%2Foauth.html&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file&access_type=offline&prompt=consent&response_type=code
+```
+
+#### 方法B: REST API（curl）
+```bash
+PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
+
+curl -X POST \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "Content-Type: application/json" \
+  -H "X-Goog-User-Project: PROJECT_ID" \
+  "https://global-discoveryengine.googleapis.com/v1alpha/projects/${PROJECT_NUMBER}/locations/global/authorizations?authorizationId=drive-auth" \
+  -d '{
+    "name": "projects/'"${PROJECT_NUMBER}"'/locations/global/authorizations/drive-auth",
+    "serverSideOauth2": {
+      "clientId":         "OAUTH_CLIENT_ID",
+      "clientSecret":     "OAUTH_CLIENT_SECRET",
+      "authorizationUri":  "https://accounts.google.com/o/oauth2/v2/auth?client_id=OAUTH_CLIENT_ID&redirect_uri=https%3A%2F%2Fvertexaisearch.cloud.google.com%2Fstatic%2Foauth%2Foauth.html&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file&access_type=offline&prompt=consent&response_type=code",
+      "tokenUri":         "https://oauth2.googleapis.com/token"
+    }
+  }'
+```
+（出典: [Register and manage A2A agents](https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-a2a-agent) の curl 例で一次情報確認済み）
+
+> 注意（混同しやすい点）: URLパスと`name`フィールドは **`PROJECT_NUMBER`**（数字）、`X-Goog-User-Project` ヘッダーだけ **`PROJECT_ID`**（文字列）。両者を取り違えない。
+
+- リソース名: `projects/PROJECT_NUMBER/locations/global/authorizations/AUTH_ID`
+- `AUTH_ID`（＝`drive-auth`）は `.env` の `GEMINI_AUTH_ID` と一致させる。
 
 ---
 
